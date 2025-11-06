@@ -21,6 +21,7 @@ SUPPORTED_EXTENSIONS = (".pdf", ".txt")
 
 
 def resolve_api_key(explicit: str | None) -> str:
+    """Return the first available Gemini API key from CLI or environment."""
     for key in (explicit, os.environ.get("GEMINI_API_KEY"), os.environ.get("GOOGLE_API_KEY"), os.environ.get("GENAI_API_KEY")):
         if key:
             return key
@@ -28,6 +29,7 @@ def resolve_api_key(explicit: str | None) -> str:
 
 
 def iter_documents(data_dir: Path) -> Iterable[Path]:
+    """Yield supported documents under the provided directory, depth-first."""
     for path in sorted(data_dir.glob("**/*")):
         if path.suffix.lower() in SUPPORTED_EXTENSIONS and path.is_file():
             yield path
@@ -45,6 +47,7 @@ def ingest_corpus(
     collection_name: str,
     reset: bool,
 ) -> None:
+    """Chunk every supported document and upsert its embeddings into ChromaDB."""
     if not data_dir.exists():
         raise FileNotFoundError(f"Data directory not found: {data_dir}")
     files = list(iter_documents(data_dir))
@@ -103,10 +106,28 @@ def ingest_corpus(
 
 
 def format_context_block(index: int, text: str, metadata: Dict[str, object]) -> str:
+    """Return a readable context block label for prompt construction."""
     source = metadata.get("source", "unknown")
     page = metadata.get("page")
     page_label = f", trang {page}" if page else ""
     return f"[Đoạn {index} | {source}{page_label}]\n{text.strip()}"
+
+
+def build_prompt(question: str, contexts: List[Dict[str, object]]) -> str:
+    """Compose a grounded prompt with explicit instructions and retrieved contexts."""
+    prompt_parts: List[str] = [
+        "Bạn là trợ lý pháp lý tiếng Việt.",
+        "Sử dụng nguyên văn các đoạn trích dẫn bên dưới để trả lời câu hỏi.",
+        "Nếu câu hỏi yêu cầu nội dung của một Điều luật, hãy ghép đầy đủ tất cả các khoản, điểm liên quan từ những đoạn được cung cấp, giữ nguyên số thứ tự và không tóm tắt.",
+        "Nếu không tìm thấy thông tin phù hợp, hãy trả lời rằng bạn chưa có dữ liệu để trả lời.",
+        "Hãy trích dẫn nguồn bằng cách ghi rõ tên file (và trang nếu có).",
+        "\nCác đoạn trích:",
+    ]
+    for index, context in enumerate(contexts, start=1):
+        prompt_parts.append(format_context_block(index, context["text"], context["metadata"]))
+    prompt_parts.append("\nCâu hỏi: " + question.strip())
+    prompt_parts.append("\nCâu trả lời:")
+    return "\n\n".join(prompt_parts)
 
 
 def retrieve_context(
@@ -116,6 +137,7 @@ def retrieve_context(
     question: str,
     top_k: int,
 ) -> List[Dict[str, object]]:
+    """Retrieve the nearest chunks for a question and narrow by source when possible."""
     query_embedding = embedder.embed_query(question)
     results = collection.query(
         query_embeddings=[query_embedding],
@@ -149,6 +171,7 @@ def generate_answer(
     question: str,
     contexts: List[Dict[str, object]],
 ) -> str:
+    """Send a grounded prompt to Gemini and return the resulting answer text."""
     genai.configure(api_key=api_key)
     clean_model = llm_model.strip()
     if clean_model.startswith("models/"):
@@ -161,20 +184,7 @@ def generate_answer(
         "gemini-flash": "gemini-flash-latest",
     }
     clean_model = legacy_map.get(clean_model, clean_model)
-    prompt_parts: List[str] = [
-        "Bạn là trợ lý pháp lý tiếng Việt.",
-        "Sử dụng nguyên văn các đoạn trích dẫn bên dưới để trả lời câu hỏi.",
-        "Nếu câu hỏi yêu cầu nội dung của một Điều luật, hãy ghép đầy đủ tất cả các khoản, điểm liên quan từ những đoạn được cung cấp, giữ nguyên số thứ tự và không tóm tắt.",
-        "Nếu không tìm thấy thông tin phù hợp, hãy trả lời rằng bạn chưa có dữ liệu để trả lời.",
-        "Hãy trích dẫn nguồn bằng cách ghi rõ tên file (và trang nếu có).",
-        "\nCác đoạn trích:"
-    ]
-    for idx, ctx in enumerate(contexts, start=1):
-        block = format_context_block(idx, ctx["text"], ctx["metadata"])
-        prompt_parts.append(block)
-    prompt_parts.append("\nCâu hỏi: " + question.strip())
-    prompt_parts.append("\nCâu trả lời:")
-    prompt = "\n\n".join(prompt_parts)
+    prompt = build_prompt(question, contexts)
     model = genai.GenerativeModel(clean_model)
     response = model.generate_content(prompt)
     answer = (response.text or "").strip() if hasattr(response, "text") else ""
@@ -184,6 +194,7 @@ def generate_answer(
 
 
 def display_answer(answer: str, contexts: List[Dict[str, object]], show_context: bool, suppress_sources: bool = False) -> None:
+    """Print the final answer and any supporting citations."""
     print("\n=== Trả lời ===")
     print(answer)
     if suppress_sources:
@@ -239,6 +250,7 @@ def display_answer(answer: str, contexts: List[Dict[str, object]], show_context:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Define the CLI surface for ingesting and querying the corpus."""
     parser = argparse.ArgumentParser(description="RAG đơn giản cho bộ luật trong thư mục CAC_BO_LUAT")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -268,6 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def locate_source_file(source: str, search_dirs: Sequence[Path]) -> Path | None:
+    """Best-effort search for a relative source path within known directories."""
     candidates: List[Path] = []
     source_name = Path(source).name
     for base in search_dirs:
@@ -295,6 +308,7 @@ ARTICLE_NUMBER_PATTERN = re.compile(r"(?i)\b(?:Điều|Dieu|Di.{0,1}u|DIEU)\s+(\
 
 
 def extract_article_verbatim(path: Path, number: int) -> tuple[str, List[int]] | None:
+    """Pull the raw text for a Điều directly from the source document."""
     pages = extract_document_pages(str(path), preserve_newlines=True)
     combined_parts: List[str] = []
     for page_num, text in pages:
@@ -346,6 +360,7 @@ def try_direct_article_answer(
     contexts: List[Dict[str, object]],
     search_dirs: Sequence[Path],
 ) -> tuple[str, List[Dict[str, object]], bool] | None:
+    """Return the full Điều text when all retrieved snippets point to the same source."""
     match = ARTICLE_NUMBER_PATTERN.search(question)
     if not match or not contexts:
         return None

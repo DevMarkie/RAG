@@ -5,7 +5,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence
+from typing import List, Sequence
 
 import google.generativeai as genai
 from tqdm import tqdm
@@ -41,11 +41,11 @@ class GeminiEmbedder:
         return embeddings[0]
 
     def _embed(self, texts: Sequence[str], task_type: str, batch_size: int = 16) -> List[List[float]]:
+        """Shared embedding routine for both document and query payloads."""
         outputs: List[List[float]] = []
-        iterator: Iterable[str] = texts
         disable_bar = len(texts) < 5
-        with tqdm(total=len(texts), disable=disable_bar, unit="chunk", desc="Embedding") as bar:
-            for text in iterator:
+        with tqdm(total=len(texts), disable=disable_bar, unit="chunk", desc="Embedding") as progress:
+            for text in texts:
                 cleaned = text.strip()
                 if not cleaned:
                     raise ValueError("Encountered empty chunk during embedding. Check chunking step.")
@@ -58,7 +58,7 @@ class GeminiEmbedder:
                 if embedding is None:
                     raise RuntimeError("Gemini embedding response missing 'embedding' field")
                 outputs.append(embedding)
-                bar.update(1)
+                progress.update(1)
                 # Gemini rate limits are generous, but a small sleep helps avoid spikes.
                 if batch_size > 0:
                     time.sleep(0.05)
